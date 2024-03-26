@@ -10,7 +10,7 @@ metadata_and_counts.csv
 Contains experimental design variables (treatments, material types, and sampling time points), measurements of bacterial (Objects.mL, Objects.cm2) and fungal abundance (spore_density, hyphal_length), as well as richness, Chao Shannon diversity, and number of reads for bacteria (16S) and fungi (ITS). 
 
 clean_ITStable.tsv
-Fungal read counts of each sample, identified to genus level. Note code around line 800 of script corrects mis-alignment in this datafile.
+Fungal read counts of each sample, identified to genus level. Note code around line 785 of script corrects mis-alignment in this datafile.
 
 clean_16Stable.tsv
 Bacterial read counts of each sample, identified to genus level. 
