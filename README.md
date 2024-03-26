@@ -21,8 +21,8 @@ Raw fungal OTU counts by sample.
 16S-features.tsv
 Raw bacterial OTU counts by sample. 
 
-Full_BE_manuscript_analysis.Rmd
-Complete script to reproduce data analysis in manuscript. 
+Full_BE_manuscript_analysis_anonymized.Rmd
+Complete script to reproduce data analysis in manuscript, anonymized for double-blind review. 
 
 Instructions: .Rmd is set to use current diretory as working directory, so having .Rmd and all 5 data files in a single directory or folder will allow the analysis to be reproduced. Either Run All, or Knit to generate html output. 
 
