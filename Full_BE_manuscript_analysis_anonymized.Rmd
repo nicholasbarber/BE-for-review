@@ -1,0 +1,1553 @@
+---
+title: "Built Environment"
+author: "[redacted]"
+date: "2022-2024"
+output: html_document
+---
+
+Analysis of Built Environment experiment. Coupons of three common building materials sat in an open, unoccupied (due to COVID) lab room from March 2020-March 2021, then were subjected to either consistent wetting or alternating wet-dry cycles. Surfaces were swabbed to sample microbial (bacterial and fungal) communities, to count bacterial cells, fungal hyphae, and fungal spores, and to measure ATP activity. 
+
+The analysis below is based on [redacted] MS thesis work ([redacted]), and much of the code is modified from her scripts. The project was carried out largely by [redacted], with assistance from [redacted] and [redacted]. [redacted] was assisted by [redacted] in PCR work. Project PIs were [redacted] and [redacted]. 
+
+```{r setup, include=FALSE}
+library(ggfortify) #for residuals and qqnorm
+library(car) #for Anova type 3
+library(nlme) #for mixed linear effects models
+library(vegan) #for diversity analysis
+library(stringr) #for formatting and changing
+library(corrplot) #for correlation plots
+library(tidyr)
+library(randomForest)
+library(paletteer)
+library(rcompanion) #for tukey transformation
+library(caTools)
+library(ggpubr)
+library(lme4)
+library(emmeans)
+library(blmeco)
+library(iNEXT)
+library(tidyverse)
+```
+
+## Import and filter data
+```{r Import and filter data}
+be_data <- read.csv("metadata_and_counts.csv", stringsAsFactors = T, na.strings = c("", "na", "NA"))
+
+be_data$Day <- as.factor(be_data$Day)
+be_data$CouponId <- as.factor(be_data$CouponId)
+
+be_bac <- be_data %>%
+   dplyr::select(1,2, 4, 5, 11, 12, 13) %>% #just selecting CouponTime, CouponId, ATP, Day, Materials, RH, Objects.mL
+   na.omit() #select only relevant data from dataset and remove NAs
+ #change these variables to factor type variables
+be_bac$Day <- as.factor(be_bac$Day)
+be_bac$CouponId <- as.factor(be_bac$CouponId)
+ 
+be_fun <- be_data %>%
+   dplyr::select(1,2, 4, 5, 11, 12, 17:18) %>% #as above, but spore_density and hyphae_length instead of cell counts
+   na.omit()
+# 
+# be_fun$Day <- as.factor(be_fun$Day)
+```
+
+##..Part 1: Productivity
+Objective of these analyses is to determine which of the three material types supports the greatest productivity, measured as bacterial cell counts and fungal hyphae length. Fungal spore production and ATP were also measured as additional possible assessments. 
+
+##Effects on Bacterial Counts
+The following coupons/time points were missing cell counts, hyphae length, and spore density:
+Coupon 5, T1
+Coupon 21, T1
+Coupon 23, T3
+Coupon 25, T3
+Coupon 37, T2
+Coupon 41, T2
+Coupon 43, T2
+Coupon 49, T2
+
+These coupons were added in place of the above:
+Coupon 38, T2
+Coupon 42, T2
+Coupon 50, T2
+
+Coupon samples were substituted in cases where biomass was low so there would be more sample available for sequencing. 
+
+Other notes:
+Coupon 50 "RH" was initially miscoded as "CYC" for 2 time points, when it should be "WET". Fixed in metadata_and_counts.csv file, so the imported file in the code chunk above is correct. 
+
+```{r bacterial cell counts analysis}
+#bacterial cell counts are expressed as objects per mL; divided by 1000 to express as objects/uL
+be_data$Objects.uL <- be_data$Objects.mL/1000
+belme <- lme(log(Objects.uL) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+
+#residuals look good
+plot(belme)
+qqnorm(resid(belme))
+hist(resid(belme)) 
+
+summary(belme, test = 'F')
+
+#Type 3 tests because unbalanced and have interactions
+options(contrasts = c("contr.sum", "contr.poly"))
+belme <- lme(log(Objects.uL) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+Anova(belme, type = 3, test="F")
+options(contrasts = c("contr.treatment", "contr.poly")) #note, need to refit with treatment contrasts to see normal summary table
+
+#Visualization
+bacmeans<-emmeans(belme, ~ RH:Day:Materials, type="response")
+bacmeansdata <- as.data.frame(summary(bacmeans))
+bacmeansdata$lower <- bacmeansdata$response-bacmeansdata$SE
+bacmeansdata$upper <- bacmeansdata$response+bacmeansdata$SE
+bacmeansdata$MatRH <- paste(bacmeansdata$Materials, bacmeansdata$RH)
+bacmeansdata$Dayoffset <- as.numeric(paste(bacmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+bac_count <- ggplot(bacmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=bacmeansdata$lower, ymax=bacmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "Bacterial Density (Objects/uL)", color = "Material", size=5) +
+  ylim(0,100000) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(7,21,35,49)) +
+  geom_text(x=5, y=100000, label="Material x Treatment x Day, P < 0.0001", color="black", hjust=0)
+
+bac_count #suggested additions: custom build legend rather than rely on auto legend. 
+ggexport(bac_count, filename = "Bacterial_count.pdf", width=6, height=4)
+
+
+endfigdata <- filter(bacmeansdata, Day == 49)# & RH == 'WET')
+endfigdata$Materials = factor(endfigdata$Materials, levels=c("MDF", "GW", "OSB"))
+  
+endbacfig <- ggplot(endfigdata, aes(x=Materials, y= response, color = Materials, shape = RH, group = MatRH)) + 
+  geom_pointrange(ymin=endfigdata$lower, ymax=endfigdata$upper, size=1.5, position = position_dodge(0.3)) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("royalblue2","goldenrod","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Bacterial Density (Objects/uL)", color = "Material") +
+  ylim(0,100000) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1) +
+  annotate("point", x = 0.55, y = 100000,colour = "darkgray", size=5) +
+  annotate("point", x = 0.55, y = 90000,colour = "darkgray", shape=1, size=5) +
+  annotate("text", x=0.7, y=100000, label = "Wet", adj=0, size=5) +
+  annotate("text", x=0.7, y=90000, label = "Cycling", adj=0, size=5) +
+  annotate("text", x=3.4, y=100000, label = "A", size=8)
+endbacfig
+```
+
+##Effects on Fungal Hyphae length
+
+```{r hyphae length analysis}
+
+hlme <- lme(log(hyphae_length+1) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+
+plot(hlme)
+qqnorm(resid(hlme))
+hist(resid(hlme))
+
+options(contrasts = c("contr.sum", "contr.poly"))
+hlme <- lme(log(hyphae_length+1) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+Anova(hlme, type = 3)
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+hlme <- lme(log(hyphae_length+1) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit) #refit under contrast treatments
+summary(hlme)
+
+#Visualization
+funmeans<-emmeans(hlme, ~ RH:Day:Materials, type = "response")
+funmeansdata <- as.data.frame(summary(funmeans))
+funmeansdata$lower <- funmeansdata$response-funmeansdata$SE
+funmeansdata$upper <- funmeansdata$response+funmeansdata$SE
+funmeansdata$MatRH <- paste(funmeansdata$Materials, funmeansdata$RH)
+funmeansdata$Dayoffset <- as.numeric(paste(funmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+fun_len <- ggplot(funmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=funmeansdata$lower, ymax=funmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "Fungal Length", color = "Material", size=5) +
+  ylim(0,10000) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(7,21,35,49)) +
+  geom_text(x=5, y=10000, label="Material x Day, P < 0.0001", color="black", hjust=0)
+fun_len
+ggexport(fun_len, filename = "Fungal_length.pdf", width=6, height=4)
+
+endfungfigdata <- filter(funmeansdata, Day == 49) #& RH == 'WET')
+endfungfigdata$Materials = factor(endfungfigdata$Materials, levels=c("MDF", "GW", "OSB"))
+  
+endfungfig <- ggplot(endfungfigdata, aes(x=Materials, y= response, color = Materials, shape = RH, group = MatRH)) + 
+  geom_pointrange(ymin=endfungfigdata$lower, ymax=endfungfigdata$upper, size=1.5, position = position_dodge(0.3)) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("royalblue2","goldenrod","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Fungal hyphae length", color = "Material") +
+  ylim(0,12000) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1) +
+  annotate("text", x=3.4, y=12000, label = "B", size=8)
+endfungfig
+```
+
+##Effects on Fungal Spore counts
+
+```{r spore analysis}
+slme <- lme(log(spore_density) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+
+
+plot(slme)
+qqnorm(resid(slme))
+hist(resid(slme))
+
+options(contrasts = c("contr.sum", "contr.poly"))
+slme <- lme(log(spore_density) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+Anova(slme, type = 3)
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+slme <- lme(log(spore_density) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+
+#Visualization
+slomeans<-emmeans(slme, ~ RH:Day:Materials, type="response")
+slomeansdata <- as.data.frame(summary(slomeans))
+slomeansdata$lower <- slomeansdata$response-slomeansdata$SE
+slomeansdata$upper <- slomeansdata$response+slomeansdata$SE
+slomeansdata$MatRH <- paste(slomeansdata$Materials, slomeansdata$RH)
+slomeansdata$Dayoffset <- as.numeric(paste(slomeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+slofig <- ggplot(slomeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=slomeansdata$lower, ymax=slomeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "Fungal spore density", color = "Material") +
+  ylim(0,2500) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(7,21,35,49)) +
+  geom_text(x=5, y=2500, label="Material x Treatment x Day, P = 0.053", color="black", hjust=0)
+slofig
+
+ggexport(slofig, filename = "Spore_density.pdf", width=6, height=4)
+
+endsporefigdata <- filter(slomeansdata, Day == 49) #& RH == 'WET')
+endsporefigdata$Materials = factor(endsporefigdata$Materials, levels=c("MDF", "GW", "OSB"))
+  
+endsporefig <- ggplot(endsporefigdata, aes(x=Materials, y= response, color = Materials, shape = RH, group = MatRH)) + 
+  geom_pointrange(ymin=endsporefigdata$lower, ymax=endsporefigdata$upper, size=1.5, position = position_dodge(0.3)) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("royalblue2","goldenrod","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Spore density", color = "Material") +
+  ylim(0,3000) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1) +
+  annotate("text", x=3.4, y=12000, label = "B", size=8)
+endsporefig
+```
+
+##Effects on ATP
+```{r ATP analysis}
+alme <- lme(log(ATP+1) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+
+plot(alme)
+qqnorm(resid(alme))
+hist(resid(alme))
+
+options(contrasts = c("contr.sum", "contr.poly"))
+alme <- lme(log(ATP+1) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+Anova(alme, type = 3)
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+alme <- lme(log(ATP+1) ~ RH * Day * Materials, random = ~1|CouponId, data = be_data, method = "ML", na.action = na.omit)
+
+#Visualization
+atpmeans<-emmeans(alme, ~ RH:Day:Materials)
+atpmeansdata <- as.data.frame(summary(atpmeans))
+atpmeansdata$lower <- atpmeansdata$emmean-atpmeansdata$SE
+atpmeansdata$upper <- atpmeansdata$emmean+atpmeansdata$SE
+atpmeansdata$MatRH <- paste(atpmeansdata$Materials, atpmeansdata$RH)
+atpmeansdata$Dayoffset <- as.numeric(paste(atpmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+atpfig <- ggplot(atpmeansdata, aes(x=Dayoffset, y= emmean, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=atpmeansdata$lower, ymax=atpmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "log(ATP)", color = "Material") +
+  ylim(0,9) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.008", color="black", hjust=1)
+atpfig
+```
+```{r}
+#Multipanel supplemental figure of bacterial counts, fungal length, and spore density by treatment, material, and day
+biomass_suppl_fig<-ggarrange(bac_count, fun_len, slofig, nrow=3, ncol=1, align = "h", common.legend=T, legend="top", labels = "AUTO", font.label = list(size = 24), label.x=0.9)
+ggexport(biomass_suppl_fig, filename = "biomass_suppl_fig.pdf", width=6, height=12)
+```
+
+
+##..Part 2: Alpha Diversity
+```{r Import Data}
+#Using features tables. Note that this table has no taxonomic information, just OTU's id'd and assigned a serial number. 
+features16S <- read.csv("16S-features.tsv", stringsAsFactors = T, sep = '\t')
+rownames(features16S) <- features16S[,1]
+features16S <- features16S[,-1]
+tfeatures16S <- t(features16S)
+chao16S <- estimateR(tfeatures16S) #here, chao1 estimator and species observed are identical because there are no "rare" species (i.e., species with <10 occurrences) in the dataset. 
+cshan <- ChaoShannon(features16S)
+
+#S.obs values were added to metadata_and_counts.csv, which is imported as be_data above. S.obs are under column "rich16s". Chao Shannon estimator is under "cshan16s":
+
+#note that ITS sequencing only took place on half the samples because of limited ITS primer. Also note coupon 41.T4 has very high numbers that vary from table to table, so excluded 41.T4 from ITS richness and shannon calculations. Will exclude coupon 41 from composition analyses too. 
+
+featuresITS <- read.csv("itsfeaturetable.tsv", stringsAsFactors = T, sep = '\t')
+rownames(featuresITS) <- featuresITS[,1]
+featuresITS <- featuresITS[,-1]
+featuresITS <- featuresITS[,-79]  #drop 41.T4
+#chaoITS <- estimateR(featuresITS)  #added to metadata_and_counts.csv as richITS, commented out to save time
+#cshanITS <- ChaoShannon(featuresITS) #added to metadata_and_counts.csv as cshanITS, commented out to save time
+```
+
+## Effects on 16S richness
+```{r linear model 16S richness}
+#Bacterial richness responses to treatment on different materials over time. Dropping Day 0 from analysis. 
+
+be_data_noday0 <- filter(be_data, Day != 0)
+c16slm <- glmer((rich16s) ~ RH * Day * Materials + (1|CouponId), data = be_data_noday0, family=poisson, na.action = na.omit)
+dispersion_glmer(c16slm) #overdispersed
+
+obs <- c(1:length(be_data_noday0$rich16s)) #create observation-level random effect to account for overdispersion
+c16slm <- glmer((rich16s) ~ RH * Day * Materials + (1|CouponId) + (1|obs), data = be_data_noday0, family=poisson, na.action = na.omit) #doesn't converge, use bobyqa:
+c16slm2 <- glmer((rich16s) ~ RH * Day * Materials + (1|CouponId) + (1|obs), data = be_data_noday0, family=poisson, na.action = na.omit, glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+dispersion_glmer(c16slm2) #not overdispersed, yay
+
+plot(c16slm2) #residuals gonna look bad because of OLRE
+qqnorm(resid(c16slm2)) #residuals gonna look bad because of OLRE
+hist(resid(c16slm2)) #residuals gonna look bad because of OLRE
+
+options(contrasts = c("contr.sum", "contr.poly"))
+c16slm2 <- glmer((rich16s) ~ RH * Day * Materials + (1|CouponId) + (1|obs), data = be_data_noday0, family=poisson, na.action = na.omit, glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+Anova(c16slm, type = 3) #significant three-way interaction among treatment, day, and material
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+rich16smeans<-emmeans(c16slm2, ~ RH:Day:Materials, type = "response")
+rich16smeansdata <- as.data.frame(summary(rich16smeans))
+rich16smeansdata$lower <- rich16smeansdata$response-rich16smeansdata$SE
+rich16smeansdata$upper <- rich16smeansdata$response+rich16smeansdata$SE
+rich16smeansdata$MatRH <- paste(rich16smeansdata$Materials, rich16smeansdata$RH)
+rich16smeansdata$Dayoffset <- as.numeric(paste(rich16smeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+rich16Sfig <- ggplot(rich16smeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=rich16smeansdata$lower, ymax=rich16smeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "Bacterial richness", color = "Material") +
+  ylim(0,100) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1)
+rich16Sfig
+
+
+endfigdata <- filter(rich16smeansdata, Day == 49)
+endfigdata$Materials = factor(endfigdata$Materials, levels=c("MDF", "GW", "OSB"))
+endrich16Sfig <- ggplot(endfigdata, aes(x=Materials, y= response, color = Materials, shape = RH, group = MatRH)) + 
+  geom_pointrange(ymin=endfigdata$lower, ymax=endfigdata$upper, size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("royalblue2","goldenrod","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Bacterial richness", color = "Material") +
+  ylim(0,100) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1)
+endrich16Sfig
+
+#Bacteria richness differences among treatment and material at end of experiment - richness dynamics change over time, but end point best reflects community outcomes of a series of disturbances
+```
+
+## Effects on 16S ChaoShannon
+```{r Create linear model 16S Shannon}
+#Bacterial Shannon responses to treatment on different materials over time. Dropping Day 0 from analysis. 
+
+be_data_noday0 <- filter(be_data, Day != 0)
+shan16slm <- lmer((cshan16s) ~ RH * Day * Materials + (1|CouponId), data = be_data_noday0, na.action = na.omit)
+
+plot(shan16slm) 
+qqnorm(resid(shan16slm)) 
+hist(resid(shan16slm)) 
+
+options(contrasts = c("contr.sum", "contr.poly"))
+shan16slm <- lmer((cshan16s) ~ RH * Day * Materials + (1|CouponId), data = be_data_noday0, na.action = na.omit)
+Anova(shan16slm, type = 3) #significant three-way interaction among treatment, day, and material
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+shan16smeans<-emmeans(shan16slm, ~ RH:Day:Materials, type = "response")
+shan16smeansdata <- as.data.frame(summary(shan16smeans))
+shan16smeansdata$lower <- shan16smeansdata$response-shan16smeansdata$SE
+shan16smeansdata$upper <- shan16smeansdata$response+shan16smeansdata$SE
+shan16smeansdata$MatRH <- paste(shan16smeansdata$Materials, shan16smeansdata$RH)
+shan16smeansdata$Dayoffset <- as.numeric(paste(shan16smeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+shan16Sfig <- ggplot(shan16smeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=shan16smeansdata$lower, ymax=shan16smeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "Bacterial Shannon Diversity", color = "Material") +
+  ylim(0,5) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1)
+shan16Sfig
+
+endfigdata <- filter(shan16smeansdata, Day == 49)
+endfigdata$Materials = factor(endfigdata$Materials, levels=c("MDF", "GW", "OSB"))
+endshan16Sfig <- ggplot(endfigdata, aes(x=factor(Materials, level=c('MDF', 'GW', 'OSB')), y= response, color = Materials, shape = RH, group = MatRH)) + 
+  geom_pointrange(ymin=endfigdata$lower, ymax=endfigdata$upper, size=1.5, position = position_dodge(0.3)) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("royalblue2","goldenrod","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Bacterial Shannon Diversity", color = "Material") +
+  ylim(0,5) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  annotate("text", x=3.4, y=5, label = "C", size=8)
+  #geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1)
+endshan16Sfig
+
+```
+
+##Effects on ITS richness
+Note that 41.T4 removed above because of ITS count problems. 
+```{r ITS Chao1 Linear Model}
+#again, basically same as richness because not enough rare species to influence Chao estimator. 
+#Using be_data_noday0 from above to ignore day 0 before treatments started. 
+cITSlm <- glmer((richITS) ~ RH * Day * Materials + (1|CouponId), data = be_data_noday0, family=poisson, na.action = na.omit)
+dispersion_glmer(cITSlm) #moderately overdispersed, 1.797
+
+obs <- c(1:length(be_data_noday0$richITS)) #create observation-level random effect to account for overdispersion
+cITSlm <- glmer((richITS) ~ RH * Day * Materials + (1|CouponId) + (1|obs), data = be_data_noday0, family=poisson, na.action = na.omit) #doesn't converge, use bobyqa:
+cITSlm <- glmer((richITS) ~ RH * Day * Materials + (1|CouponId) + (1|obs), data = be_data_noday0, family=poisson, na.action = na.omit, glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+dispersion_glmer(cITSlm) #not overdispersed, 1.119
+
+plot(cITSlm) #gonna look bad because of OLRE; OLRE-free model somewhat heteroscedastic. 
+qqnorm(resid(cITSlm)) #gonna look bad because of OLRE
+hist(resid(cITSlm)) #gonna look bad because of OLRE
+
+options(contrasts = c("contr.sum", "contr.poly"))
+cITSlm <- glmer((richITS) ~ RH * Day * Materials + (1|CouponId) + (1|obs), data = be_data_noday0, family=poisson, na.action = na.omit, glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+Anova(cITSlm, type = 3) #significant two-way interaction bewteen day and material, no RH effects
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+richITSmeans<-emmeans(cITSlm, ~ RH:Day:Materials, type = "response")
+richITSmeansdata <- as.data.frame(summary(richITSmeans))
+richITSmeansdata$lower <- richITSmeansdata$response-richITSmeansdata$SE
+richITSmeansdata$upper <- richITSmeansdata$response+richITSmeansdata$SE
+richITSmeansdata$MatRH <- paste(richITSmeansdata$Materials, richITSmeansdata$RH)
+richITSmeansdata$Dayoffset <- as.numeric(paste(richITSmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+richITSfig <- ggplot(richITSmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=richITSmeansdata$lower, ymax=richITSmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "Fungal richness", color = "Material") +
+  ylim(0,75) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1)
+richITSfig
+
+endfungrichfigdata <- filter(richITSmeansdata, Day == 49)
+endfungrichfigdata$Materials = factor(endfungrichfigdata$Materials, levels=c("MDF", "GW", "OSB"))
+endfungrichfig <- ggplot(endfungrichfigdata, aes(x=factor(Materials, level=c('MDF', 'GW', 'OSB')), y= response, color = Materials, shape = RH, group = MatRH)) + 
+  geom_pointrange(ymin=endfungrichfigdata$lower, ymax=endfungrichfigdata$upper, position = position_dodge(width = 0.15), size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("royalblue2","goldenrod","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Fungal richness", color = "Material") +
+  ylim(0,65) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") 
+  #geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.005", color="black", hjust=1)
+endfungrichfig
+
+```
+
+##Effects on ITS ChaoShannon
+```{r ITS Shannon diversity model}
+#Using be_data_noday0 from above to ignore day 0 before treatments started. 
+cITSshanlm <- lmer((cshanITS) ~ RH * Day * Materials + (1|CouponId), data = be_data_noday0, na.action = na.omit)
+
+plot(cITSshanlm) #looks good
+qqnorm(resid(cITSshanlm)) #not bad
+hist(resid(cITSshanlm)) #fine
+
+options(contrasts = c("contr.sum", "contr.poly"))
+cITSshanlm <- lmer((cshanITS) ~ RH * Day * Materials + (1|CouponId), data = be_data_noday0, na.action = na.omit)
+Anova(cITSshanlm, type = 3) #significant three-way interaction among treatment, day, and material
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+
+shanITSmeans<-emmeans(cITSshanlm, ~ RH:Day:Materials, type = "response")
+shanITSmeansdata <- as.data.frame(summary(shanITSmeans))
+shanITSmeansdata$lower <- shanITSmeansdata$response-shanITSmeansdata$SE
+shanITSmeansdata$upper <- shanITSmeansdata$response+shanITSmeansdata$SE
+shanITSmeansdata$MatRH <- paste(shanITSmeansdata$Materials, shanITSmeansdata$RH)
+shanITSmeansdata$Dayoffset <- as.numeric(paste(shanITSmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+shanITSfig <- ggplot(shanITSmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=shanITSmeansdata$lower, ymax=shanITSmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "Fungal shannon", color = "Material") +
+  ylim(0,3) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=50, y=0, label="Material x Treatment x Day, P = 0.023", color="black", hjust=1)
+shanITSfig
+
+endfungshanfigdata <- filter(shanITSmeansdata, Day == 49)
+endfungshanfigdata$Materials = factor(endfungshanfigdata$Materials, levels=c("MDF", "GW", "OSB"))
+endfungshanfig <- ggplot(endfungshanfigdata, aes(x=factor(Materials, level=c('MDF', 'GW', 'OSB')), y= response, color = Materials, shape = RH, group = MatRH)) + 
+  geom_pointrange(ymin=endfungshanfigdata$lower, ymax=endfungshanfigdata$upper, position = position_dodge(0.3), size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("royalblue2","goldenrod","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Fungal Shannon diversity", color = "Material") +
+  ylim(0,3) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none")  +
+  annotate("text", x=3.4, y=3, label = "D", size=8)
+  #annotate(text(x=1, y=1, label="Material x Treatment x Day, P = 0.023", color="black", hjust=1)
+endfungshanfig
+
+```
+
+
+##..Part 3: Beta Diversity
+
+##Bacterial Taxonomy
+```{r Load and filter bacteria}
+bac_tax <- read.csv("16S-features.tsv", sep = "\t")
+colnames(bac_tax) <- str_replace(colnames(bac_tax), "X", "")
+
+#Format community tables
+bcnts <- bac_tax[-1]
+btax <- data.frame(sapply(bcnts, as.numeric))
+rownames(btax) <- bac_tax$OTU_ID
+tbac <- data.frame(t(btax))
+rownames(tbac) <- str_replace(rownames(tbac), "X", "")
+colnames(btax) <- str_replace(colnames(btax), "X", "")
+
+#Perform center log ratio transformation
+btax[btax == 0] <- .01
+clr <- function(x) sweep(log(x), 1, rowMeans(log(x)), "-")
+bac_tx <- t(clr(t(btax))) #clr transform data
+tbac[tbac == 0] <- .01
+checkbac_tx <- (clr(tbac)) #clr transform data for later use in linear models on focal taxa identified from random forest analysis
+
+#Separate time points
+bac_txT0<-bac_tx[,grep( ".T0" , colnames(bac_tx))]
+bac_txT1<-bac_tx[,grep( ".T1" , colnames(bac_tx))]
+bac_txT2<-bac_tx[,grep( ".T2" , colnames(bac_tx))]
+bac_txT3<-bac_tx[,grep( ".T3" , colnames(bac_tx))]
+bac_txT4<-bac_tx[,grep( ".T4" , colnames(bac_tx))]
+
+#Calculate Aitchison distances for T4 samples (i.e., Euclidean distances of clr-transformed data), then put in pairwise long-form dataframe, assigning treatments to each pair member. 
+T4_Aitch <- vegdist(t(bac_txT4), method="euclidean")
+t4alist <- as.data.frame.table(as.matrix(T4_Aitch))|>
+    transform(Var1 = as.character(Var1), Var2 = as.character(Var2)) |>
+    subset(Var1<Var2)
+t4alist <- t4alist[
+  order( t4alist[,1], t4alist[,2] ),
+]
+colnames(t4alist) <- c("coup1", "coup2", "Aitch")
+testxyz <- be_data[,c(1,3,7)]
+colnames(testxyz) <- c("coup1", "material1", "wetcycling1")
+test1 <- left_join(t4alist, testxyz, by="coup1")
+colnames(testxyz) <- c("coup2", "material2", "wetcycling2")
+pairwise_Aitch <- left_join(test1, testxyz, by="coup2") %>% filter(material1 == material2) %>% filter(wetcycling1 == wetcycling2)
+
+#linear model of material and wet treatment effects on within-group bacterial beta diversity (i.e., Aitchison distance)
+bacbeta <- lm(Aitch ~ material1 * wetcycling1, data=pairwise_Aitch)
+plot(bacbeta) #residuals all look really good
+
+options(contrasts = c("contr.sum", "contr.poly"))
+bacbeta <- lm(Aitch ~ material1 * wetcycling1, data=pairwise_Aitch)
+Anova(bacbeta, type = 3) #treatment and material significant, no significant interaction
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+bacbetameans<-emmeans(bacbeta, ~ material1:wetcycling1, type = "response")
+bacbetameansdata <- as.data.frame(summary(bacbetameans))
+bacbetameansdata$lower <- bacbetameansdata$emmean-bacbetameansdata$SE
+bacbetameansdata$upper <- bacbetameansdata$emmean+bacbetameansdata$SE
+bacbetameansdata$MatRH <- paste(bacbetameansdata$material1, bacbetameansdata$wetcycling1)
+
+bacbetameansdata$Materials = as.factor(bacbetameansdata$material1)
+bacbetafig <- ggplot(bacbetameansdata, aes(x=factor(Materials, level=c('MDF', 'GW', 'OSB')), y= emmean, color = Materials, shape = wetcycling1, group = MatRH)) + 
+  geom_pointrange(ymin=bacbetameansdata$lower, ymax=bacbetameansdata$upper, position = position_dodge(0.3), size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Bacterial beta diversity", color = "Material") +
+  ylim(20,80) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  annotate("text", x=3.4, y=80, label = "E", size=8) 
+  #annotate(text(x=1, y=1, label="Material x Treatment x Day, P = 0.023", color="black", hjust=1)
+bacbetafig
+
+#NMDS
+Bact_nmdsT4 = metaMDS(t(bac_txT4), distance = "euclidean")
+
+#Time 4
+#Filter Metadata
+bact_scores4 = as.data.frame(scores(Bact_nmdsT4, display = "sites"))
+bact_scores4$CouponTime <- rownames(bact_scores4)
+bemeta4 <- inner_join(bact_scores4, be_data[c(1, 5, 11:12)])
+bemeta4$MatRH <- paste(bemeta4$Materials, bemeta4$RH)
+bemeta4$Day <- as.factor(bemeta4$Day) 
+df4 <- bemeta4 
+
+#permanova test
+bperm <- adonis2(T4_Aitch ~ RH*Materials, data = bemeta4, permutations = 9999)
+bperm
+
+bact_scores4 = as.data.frame(scores(Bact_nmdsT4, display = "sites"))
+bact_scores4$CouponTime <- rownames(bact_scores4)
+bemeta4 <- inner_join(bact_scores4, be_data[c(1, 5, 11:12)])
+bemeta4$MatRH <- paste(bemeta4$Materials, bemeta4$RH)
+bemeta4$Day <- as.factor(bemeta4$Day) 
+df4 <- bemeta4 
+#make plot
+bact_nmds_plot_T4 <- ggplot(data = df4) +
+  geom_point(aes(x = NMDS1, y = NMDS2, color = MatRH, shape = MatRH), size = 2)  +
+  stat_ellipse(geom = "polygon", aes(x = NMDS1, y = NMDS2, color = MatRH, fill = MatRH, lty=MatRH), alpha = .25) +
+  scale_fill_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c("goldenrod","goldenrod","royalblue2","royalblue2","seagreen","seagreen")) +
+  scale_color_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c("goldenrod","goldenrod","royalblue2","royalblue2","seagreen","seagreen")) +
+  scale_linetype_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c(2,1,2,1,2,1)) +
+  scale_shape_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c(2,1,2,1,2,1)) +
+  theme_classic() + 
+  theme(title = element_text(face = "bold", size = 18), axis.text = element_text(size = 13), legend.position = "right", legend.text=element_text(size=15))+
+    annotate("text", x = -50, y = 50, label = "A", size=10)
+bact_nmds_plot_T4 #can see that cycling constrains dispersion compared to constant wet treatment for all 3 material types, and that OSB has quite different compositions than the other material types. 
+```
+
+
+
+##Fungal Taxonomy
+Note: Dropping coupon 41 from analyses because of sampling and sequencing problems. 
+
+```{r Load Taxonomy Data}
+itstax <-read.csv("itsfeaturetable.tsv", sep = "\t", stringsAsFactors = T)
+itstax <- itstax[,-c(76:80)] #drop coupon 41
+
+fcnts <- itstax[2:127]
+ftax <- data.frame(sapply(fcnts, as.numeric))
+rownames(ftax) <- itstax$OTU_ID
+tfun <- data.frame(t(ftax))
+rownames(tfun) <- str_replace(rownames(tfun), "X", "")
+colnames(ftax) <- str_replace(colnames(ftax), "X", "")
+
+ftax[ftax == 0] <- .01
+clr <- function(x) sweep(log(x), 1, rowMeans(log(x)), "-")
+fun_tx <- t(clr(t(ftax))) #clr transform data
+tfun[tfun == 0] <- .01
+checkfun_tx <- (clr(tfun)) #clr transform data for later use in linear models on focal taxa identified from random forest analysis
+
+#Separate time points
+fun_txT0<-fun_tx[,grep( ".T0" , colnames(fun_tx))]
+fun_txT1<-fun_tx[,grep( ".T1" , colnames(fun_tx))]
+fun_txT2<-fun_tx[,grep( ".T2" , colnames(fun_tx))]
+fun_txT3<-fun_tx[,grep( ".T3" , colnames(fun_tx))]
+fun_txT4<-fun_tx[,grep( ".T4" , colnames(fun_tx))]
+
+#Calculate Aitchison distances for T4 samples (i.e., Euclidean distances of clr-transformed data), then put in pairwise long-form dataframe, assigning treatments to each pair member. 
+T4_fAitch <- vegdist(t(fun_txT4), method="euclidean")
+t4falist <- as.data.frame.table(as.matrix(T4_fAitch))|>
+    transform(Var1 = as.character(Var1), Var2 = as.character(Var2)) |>
+    subset(Var1<Var2)
+t4falist <- t4falist[
+  order( t4falist[,1], t4falist[,2] ),
+]
+colnames(t4falist) <- c("coup1", "coup2", "Aitch")
+testxyzf <- be_data[,c(1,3,7)]
+colnames(testxyzf) <- c("coup1", "material1", "wetcycling1")
+test1f <- left_join(t4falist, testxyzf, by="coup1")
+colnames(testxyzf) <- c("coup2", "material2", "wetcycling2")
+pairwise_fAitch <- left_join(test1f, testxyzf, by="coup2") %>% filter(material1 == material2) %>% filter(wetcycling1 == wetcycling2)
+
+#linear model of material and wet treatment effects on within-group fungal beta diversity (i.e., Aitchison distance)
+funcbeta <- lm(Aitch ~ material1 * wetcycling1, data=pairwise_fAitch)
+plot(funcbeta) #residuals all look really good
+
+options(contrasts = c("contr.sum", "contr.poly"))
+funbeta <- lm(Aitch ~ material1 * wetcycling1, data=pairwise_fAitch)
+Anova(funbeta, type = 3) #treatment and material significant, significant interaction
+options(contrasts = c("contr.treatment", "contr.poly"))
+
+
+funbetameans<-emmeans(funbeta, ~ material1:wetcycling1, type = "response")
+funbetameansdata <- as.data.frame(summary(funbetameans))
+funbetameansdata$lower <- funbetameansdata$emmean-funbetameansdata$SE
+funbetameansdata$upper <- funbetameansdata$emmean+funbetameansdata$SE
+funbetameansdata$MatRH <- paste(funbetameansdata$material1, funbetameansdata$wetcycling1)
+
+funbetameansdata$Materials = as.factor(funbetameansdata$material1)
+funbetafig <- ggplot(funbetameansdata, aes(x=factor(Materials, level=c('MDF', 'GW', 'OSB')), y= emmean, color = Materials, shape = wetcycling1, group = MatRH)) + 
+  geom_pointrange(ymin=funbetameansdata$lower, ymax=funbetameansdata$upper, position = position_dodge(0.3), size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Material", y = "Fungal beta diversity", color = "Material") +
+  ylim(40,70) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  annotate("text", x=3.4, y=70, label = "F", size=8) 
+  #annotate(text(x=1, y=1, label="Material x Treatment x Day, P = 0.023", color="black", hjust=1)
+funbetafig
+
+#NMDS
+Fung_nmdsT4 = metaMDS(t(fun_txT4), distance = "euclidean")
+
+fung_scores4 = as.data.frame(scores(Fung_nmdsT4, display = "sites"))
+fung_scores4$CouponTime <- rownames(fung_scores4)
+bemeta4fung <- inner_join(fung_scores4, be_data[c(1, 5, 11:12)])
+bemeta4fung$MatRH <- paste(bemeta4fung$Materials, bemeta4fung$RH)
+bemeta4fung$Day <- as.factor(bemeta4fung$Day) 
+fungdf4 <- bemeta4fung
+#make plot
+fung_nmds_plot_T4 <- ggplot(data = fungdf4) +
+  geom_point(aes(x = NMDS1, y = NMDS2, color = MatRH, shape = MatRH), size = 2)  +
+  stat_ellipse(geom = "polygon", aes(x = NMDS1, y = NMDS2, color = MatRH, fill = MatRH, lty=MatRH), alpha = .25) +
+  scale_fill_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c("goldenrod","goldenrod","royalblue2","royalblue2","seagreen","seagreen")) +
+  scale_color_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c("goldenrod","goldenrod","royalblue2","royalblue2","seagreen","seagreen")) +
+  scale_linetype_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c(2,1,2,1,2,1)) +
+  scale_shape_manual(name = "Materials &\nTreatment", labels = c("GW CYC", "GW WET", "MDF CYC", "MDF WET", "OSB CYC", "OSB WET"), values=c(2,1,2,1,2,1)) +
+  theme_classic() + 
+  theme(title = element_text(face = "bold", size = 18), axis.text = element_text(size = 13), legend.position = "right", legend.text=element_text(size=15)) +
+  annotate("text", x = -60, y = 50, label = "B", size=10)
+fung_nmds_plot_T4 #can see that cycling constrains dispersion compared to wet for all 3 material types, and that OSB has quite different compositions than the other material types. 
+
+#permanova test
+fperm <- adonis2(T4_fAitch ~ RH*Materials, data = fungdf4, permutations = 9999)
+fperm
+```
+
+##Figure 3 assembly
+```{r Figure 3}
+#Multipanel figure of biomass, alpha, and beta diversity for both bacteria and fungi
+productivity_figure<-ggarrange(endbacfig, endfungfig, endshan16Sfig, endfungshanfig, bacbetafig, funbetafig, nrow=3, ncol=2, align="hv")
+ggexport(productivity_figure, filename = "figureABCDEF.pdf", width=9, height=12)
+
+```
+
+##Figure 5 assembly
+```{r Figure 5}
+#Multipanel figure of NMDS for last sampling time, for bacteria and fungi
+bact_fung_nmds_fig <- ggarrange(bact_nmds_plot_T4, fung_nmds_plot_T4, nrow=1, ncol=2, align="h", common.legend=T, legend="right")
+ggexport(bact_fung_nmds_fig, filename = "nmds_figure.pdf", width=12, height=5) 
+```
+
+
+##..Part 4: Family abundances
+
+##Fungal Abundances
+
+Collate ITS reads by identified family to calculate relative abundances of each family in each sample, focusing on the final timepoint. Then multiply by relativized hyphal length to convert relative abundances into more realistic estimates of actual abundance. 
+
+But clean_ITStable.tsv, in addition to the sample 41 problems identified earlier, also lacks any reads for 9.T4, which makes me skeptical if the sample names are aligned with the correct columns. Will put ITS on hold and look at bacteria. Update Jan 2024: error identified as column mis-alignment; shifting column values over by 1 corrects this; see first few lines of code below.
+
+```{r fungal families}
+itstax2 <-read.csv("clean_ITStable.tsv", sep = "\t", stringsAsFactors = T) #why does 9.T4 have no reads? Because all count columns are shifted to the left by 1 column, because "X1.T0" column header is included but reads are not. Need to fix that:
+
+itstax2[,8:138] <- itstax2[,7:137] #shift values over by 1; should just ignore "X1.T0" column and "Species" column. This is number of reads of id'd genera by sample. 
+
+pits <- itstax2 %>%
+  filter(Domain == "Fungi") %>%
+  dplyr::select(5, 9:138) %>%
+  group_by(Family) %>%
+  summarise_all(sum) #this summarizes by number of reads per family by sample
+
+pits$Family <- as.character(pits$Family)
+pits[1,1] <- as.character("Unclassified")
+colnames(pits) <- str_replace(colnames(pits), "X", "")
+
+pits <- pits[,-c(75:79)] #remove problematic sample 41 from table of fungal reads summed by family
+
+endpits <- dplyr::select(pits, contains(".T4"))
+endpits <- t(endpits) #transpose! Still raw number of reads. 
+
+
+fcnt_samp <- as.character(pull(be_fun, CouponTime)) #get sample IDs that have fungal count data
+
+#get OTU table of only samples that have fungal cell counts
+fptax_filt <- pits %>%
+  dplyr::select(any_of(fcnt_samp))
+
+#get total number of reads for each sample
+totals <-colSums(fptax_filt)
+
+#get relative abundances for each sample
+fprabund <- fptax_filt
+fpqabund <- fptax_filt
+
+#get samples that have reads and counts
+df <- be_fun %>%
+  filter(CouponTime %in% colnames(fprabund)) 
+fcnts <- pull(df, spore_density)
+
+for (i in 1:ncol(fprabund)) {
+  fprabund[i] <- (fprabund[i] / totals[i])
+  fpqabund[i] <- fprabund[i] * fcnts[i]
+}
+
+fprabund$Family <- pits$Family #fungal relative abundances by family per sample
+fpqabund$Family <- pits$Family #fungal quantitative abundances by family per sample
+
+#Clean up fungal abundances
+fptidyr <- fprabund %>%
+  pivot_longer(`1.T1`:`59.T4`, names_to = "CouponTime", values_to = "Abundances") %>%
+  na.omit()
+
+fptidyq <- fpqabund %>%
+  pivot_longer(`1.T1`:`59.T4`, names_to = "CouponTime", values_to = "Abundances") %>%
+  na.omit()
+
+#Wet Relative abundances
+fptrmw <- inner_join(fptidyr, be_fun[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "WET") %>%
+  group_by(Family, Day, Materials) %>%
+  summarise("Mean_Abund" = mean(Abundances)) %>%
+  mutate(Family = replace(Family, Mean_Abund  < .05, "Other"))
+
+fptqmw <- inner_join(fptidyq, be_fun[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "WET") %>%
+  group_by(Family, Day, Materials) %>%
+  summarise("Mean_Abund" = mean(Abundances)) 
+
+fptqmw$Family <- fptrmw$Family
+
+#cycling relative abundances
+fptrmc <- inner_join(fptidyr, be_fun[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "CYC") %>%
+  group_by(Family, Day, Materials) %>%
+  summarise("Mean_Abund" = mean(Abundances)) %>%
+  mutate(Family = replace(Family, Mean_Abund < .05, "Other"))
+
+fptqmc <- inner_join(fptidyq, be_fun[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "CYC") %>%
+  group_by(Family, Day, Materials) %>%
+  summarise("Mean_Abund" = mean(Abundances))
+
+fptqmc$Family <- fptrmc$Family
+```
+
+```{r plot fungal abundances}
+#assign colors to Family groups
+facyc <- fptrmc %>% ungroup() %>% distinct(Family) %>% arrange(Family)
+fawet <- fptrmw %>% ungroup() %>% distinct(Family) %>% arrange(Family)
+fcomb <- data.frame(full_join(facyc, fawet), "colors" = as.character(paletteer_d("ggthemes::stata_economist"))[2:13])
+
+facyc <- inner_join(facyc, fcomb)
+fawet <- inner_join(fawet, fcomb)
+  
+fptrmc$Family = factor(fptrmc$Family, levels = c(fcomb$Family))
+fptrmw$Family = factor(fptrmw$Family, levels = c(fcomb$Family))
+fptqmc$Family = factor(fptqmc$Family, levels = c(fcomb$Family))
+fptqmw$Family = factor(fptqmw$Family, levels = c(fcomb$Family))
+
+fptrmc$Materials<-factor(fptrmc$Materials, levels = c("MDF", "GW", "OSB"))
+fptrmw$Materials<-factor(fptrmw$Materials, levels = c("MDF", "GW", "OSB"))
+fptqmc$Materials<-factor(fptqmc$Materials, levels = c("MDF", "GW", "OSB"))
+fptqmw$Materials<-factor(fptqmw$Materials, levels = c("MDF", "GW", "OSB"))
+
+
+#Relative
+frc <- ggplot(fptrmc, aes (x= Day, y = Mean_Abund, fill = Family)) +
+  geom_bar(stat = "identity") + 
+  labs(y= "Relative Abundance") +
+  scale_fill_manual(values = fcomb$colors, drop = FALSE) +
+  facet_wrap(~Materials) + 
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "none", strip.text = element_text(size = 18)) 
+
+frw <- ggplot(fptrmw, aes (x= Day, y = Mean_Abund, fill = Family)) +
+  geom_bar(stat = "identity") +
+  labs(y = "Relative Abundance") +
+  scale_fill_manual(values = fcomb$colors, drop = FALSE) +
+  facet_wrap(~Materials) +
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "none", strip.text = element_text(size = 18))
+
+#Quantitative
+fqc <- ggplot(fptqmc, aes (x= Day, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") + 
+    labs(y = "Quantitative Abundance") +
+  scale_fill_manual(values = fcomb$colors, drop = FALSE) +
+  facet_wrap(~Materials) + 
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "none", strip.text = element_text(size = 18))
+
+fqw <- ggplot(fptqmw, aes (x= Day, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") +
+    labs(y = "Quantitative Abundance") +
+  scale_fill_manual(values = fcomb$colors, drop = FALSE) +
+  facet_wrap(~Materials) +
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "none", strip.text = element_text(size = 18))
+
+frc
+frw
+fqc
+fqw
+
+#Multipanel figure of relative and quantitative abundance by treatment, material, and day
+fung_abund_figure<-ggarrange(frc, frw, fqc, fqw, nrow=2, ncol=2, align = "h", common.legend=T, legend="right", labels = "AUTO", font.label = list(size = 24))
+ggexport(fung_abund_figure, filename = "fung_abund_fig.pdf", width=9, height=12)
+
+
+
+
+#Paired wet/cycling end-point barplot as for bacterial
+#end of experiment (last sampling day only) with cycling and wet bars adjacent by material type, relative abundance
+frcrw <- bind_rows(fptrmc,fptrmw)
+frcrw$RH <- c(rep("Cycling",444),rep("Wet",444))
+frcrw_end <- filter(frcrw, Day == 49)
+                 
+frcrwendplot <- ggplot(frcrw_end, aes (x= RH, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") + 
+  labs(y = "Relative Abundance", x = "Treatment") +
+  scale_fill_manual(values = fcomb$colors, drop = FALSE) +
+  facet_wrap(~Materials) + 
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "right", strip.text = element_text(size = 18)) 
+frcrwendplot
+
+#end of experiment (last sampling day only) with cycling and wet bars adjacent by material type, quantitative abundance
+fqcqw <- bind_rows(fptqmc,fptqmw)
+fqcqw$RH <- c(rep("Cycling",444),rep("Wet",444))
+fqcqw_end <- filter(fqcqw, Day == 49)
+                 
+fqcqwendplot <- ggplot(fqcqw_end, aes (x= RH, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") + 
+  labs(y = "Quantitative Abundance", x = "Treatment") +
+  scale_fill_manual(values = fcomb$colors, drop = FALSE) +
+  facet_wrap(~Materials) + 
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "right", strip.text = element_text(size = 18)) 
+fqcqwendplot
+
+#Multipanel figure of relative and quantitative abundance by treatment, material, for final day only
+endfung_abund_figure<-ggarrange(frcrwendplot, fqcqwendplot, nrow=1, ncol=2, align = "h", common.legend=T, legend="right", labels = c("C","D"), font.label = list(size = 24))
+ggexport(endfung_abund_figure, filename = "endfung_abund_fig.pdf", width=12, height=6)
+
+```
+
+##Bacterial Abundances
+
+```{r Get phyla}
+bac_tax2 <- read.csv("clean_16Stable.tsv", sep = "\t", stringsAsFactors = T) #import 16S table
+
+pbac <- bac_tax2 %>% #summarize by family within each sample, summing reads
+  filter(Domain == "Bacteria") %>%
+  dplyr::select(5, 8:243) %>%
+  group_by(Family) %>%
+  summarise_all(sum)
+
+pbac$Family <- as.character(pbac$Family) #make family variable
+pbac[1,1] <- as.character("Unclassified") #call unclassified reads "Unclassified"
+colnames(pbac) <- str_replace(colnames(pbac), "X", "")
+```
+
+```{r Bacteia Family Abundances}
+bcnt_samp <- as.character(pull(be_bac, CouponTime)) #get sample IDs that have bacterial count data
+
+#get OTU table of only samples that have bacterial cell counts
+bptax_filt <- pbac %>%
+  dplyr::select(any_of(bcnt_samp)) 
+
+#get total number of reads for each sample
+totals <-colSums(bptax_filt)
+
+#get relative abundances for each sample
+bprabund <- bptax_filt
+bpqabund <- bptax_filt
+
+#get samples that have reads and counts
+df <- be_bac %>%
+  filter(CouponTime %in% colnames(bprabund)) 
+bcnts <- pull(df, Objects.mL)
+
+for (i in 1:ncol(bprabund)) {
+  bprabund[i] <- (bprabund[i] / totals[i])
+  bpqabund[i] <- bprabund[i] * bcnts[i]
+}
+
+bprabund$Family <- pbac$Family #relative abundance of each family
+bpqabund$Family <- pbac$Family #quantitative abundance of each family
+```
+
+```{r Clean up bacterial abundances}
+bptidyr <- bprabund %>% #cleaned up relative abundances of families
+  pivot_longer(`1.T1`:`59.T4`, names_to = "CouponTime", values_to = "Abundances") %>%
+  na.omit()
+
+bptidyq <- bpqabund %>% #cleaned up quantitative abundances of families
+  pivot_longer(`1.T1`:`59.T4`, names_to = "CouponTime", values_to = "Abundances") %>%
+  na.omit()
+
+#Mean relative and quantitative abundances of families under wet treatment
+bptrmw <- inner_join(bptidyr, be_bac[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "WET") %>%
+  group_by(Family, Day, Materials) %>%
+  summarise("Mean_Abund" = mean(Abundances)) %>% #mean relative abundance of each family/day/material combination, within the wet treatment
+  mutate(Family = replace(Family, Mean_Abund  < .05, "Other")) 
+
+bptqmw <- inner_join(bptidyq, be_bac[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "WET") %>%
+  group_by(Family, Day, Materials) %>%
+  summarise("Mean_Abund" = mean(Abundances)) #mean quantitative abundance of each family/day/material combination, within the wet treatment
+
+bptqmw$Family <- bptrmw$Family #list families less than 5% as "other"
+
+#Mean relative and quantitative abundances of families under cycling treatment
+bptrmc <- inner_join(bptidyr, be_bac[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "CYC") %>%
+  group_by(Family, Day, Materials) %>%
+  summarise("Mean_Abund" = mean(Abundances)) %>% #mean quantitative abundance of each family/day/material combination, within the wet treatment
+  mutate(Family = replace(Family, Mean_Abund < .05, "Other")) 
+
+bptqmc <- inner_join(bptidyq, be_bac[c("CouponTime", "CouponId", "Day", "Materials", "RH")]) %>%
+  filter(RH ==  "CYC") %>%
+  group_by(Family, Day, Materials) %>% #mean quantitative abundance of each family/day/material combination, within the wet treatment
+  summarise("Mean_Abund" = mean(Abundances)) 
+
+bptqmc$Family <- bptrmc$Family #list families less than 5% as "other"
+```
+
+```{r Plot Mean Family abundances}
+#assign colors to Family groups
+bacyc <- bptrmc %>% ungroup() %>% distinct(Family) %>% arrange(Family)
+bawet <- bptrmw %>% ungroup() %>% distinct(Family) %>% arrange(Family)
+
+comb <- data.frame(full_join(bacyc, bawet), "colors" = as.character(paletteer_d("ggthemes::Classic_20")[1:16]))
+
+bacyc <- inner_join(bacyc, comb)
+bawet <- inner_join(bawet, comb)
+
+bptrmc$Family = factor(bptrmc$Family, levels = c(comb$Family))
+bptrmw$Family = factor(bptrmw$Family, levels = c(comb$Family))
+bptqmc$Family = factor(bptqmc$Family, levels = c(comb$Family))
+bptqmw$Family = factor(bptqmw$Family, levels = c(comb$Family))
+
+bptrmc$Materials<-factor(bptrmc$Materials, levels = c("MDF", "GW", "OSB"))
+bptrmw$Materials<-factor(bptrmw$Materials, levels = c("MDF", "GW", "OSB"))
+bptqmc$Materials<-factor(bptqmc$Materials, levels = c("MDF", "GW", "OSB"))
+bptqmw$Materials<-factor(bptqmw$Materials, levels = c("MDF", "GW", "OSB"))
+
+#Relative abundance of bacterial families
+rc <- ggplot(bptrmc, aes (x= Day, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") + 
+  labs(y = "Relative Abundance") +
+  scale_fill_manual(values = comb$colors, drop = FALSE) +
+  facet_wrap(~Materials) + 
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "none", strip.text = element_text(size = 18)) 
+rc 
+
+rw <- ggplot(bptrmw, aes (x= Day, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") +
+  labs(y = "Relative Abundance") +
+  scale_fill_manual(values = comb$colors, drop = FALSE) +
+  facet_wrap(~Materials) +
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "right", strip.text = element_text(size = 18)) 
+  
+rw
+
+#Quantitative
+qc <- ggplot(bptqmc, aes (x= Day, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") + 
+  labs(y = "Quantitative Abundance") +
+  scale_fill_manual(values = comb$colors, drop = FALSE) +
+  facet_wrap(~Materials) +
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "none", strip.text = element_text(size = 18)) 
+
+qc 
+
+qw <- ggplot(bptqmw, aes (x= Day, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") +
+  labs(y = "Quantitative Abundance") +
+  scale_fill_manual(values = comb$colors, drop = FALSE) +
+  facet_wrap(~Materials) +
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "right", strip.text = element_text(size = 18)) 
+
+qw
+
+
+#Multipanel figure of relative and quantitative abundance by treatment, material, and day
+bact_abund_figure<-ggarrange(rc, rw, qc, qw, nrow=2, ncol=2, align = "h", common.legend=T, legend="right", labels = "AUTO", font.label = list(size = 24))
+ggexport(bact_abund_figure, filename = "bact_abund_fig.pdf", width=9, height=12)
+
+
+#end of experiment (last sampling day only) with cycling and wet bars adjacent by material type, relative abundance
+rcrw <- bind_rows(bptrmc,bptrmw)
+rcrw$RH <- c(rep("Cycling",312),rep("Wet",312))
+rcrw_end <- filter(rcrw, Day == 49)
+                 
+rcrwendplot <- ggplot(rcrw_end, aes (x= RH, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") + 
+  labs(y = "Relative Abundance", x = "Treatment") +
+  scale_fill_manual(values = bacyc$colors) +
+  facet_wrap(~Materials) + 
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "right", strip.text = element_text(size = 18)) 
+rcrwendplot
+
+#end of experiment (last sampling day only) with cycling and wet bars adjacent by material type, quantitative abundance
+qcqw <- bind_rows(bptqmc,bptqmw)
+qcqw$RH <- c(rep("Cycling",312),rep("Wet",312))
+qcqw_end <- filter(qcqw, Day == 49)
+                 
+qcqwendplot <- ggplot(qcqw_end, aes (x= RH, y = Mean_Abund, fill = Family)) +
+         geom_bar(stat = "identity") + 
+  labs(y = "Quantitative Abundance", x = "Treatment") +
+  scale_fill_manual(values = bacyc$colors) +
+  facet_wrap(~Materials) + 
+  theme_classic() +
+  theme(title = element_text(size = 20, face = "bold"), axis.text = element_text(size = 12), legend.position = "right", strip.text = element_text(size = 18)) 
+qcqwendplot
+
+#Multipanel figure of relative and quantitative abundance by treatment, material, for final day only
+endbact_abund_figure<-ggarrange(rcrwendplot, qcqwendplot, nrow=1, ncol=2, align = "h", common.legend=T, legend="right", labels = "AUTO", font.label = list(size = 24))
+ggexport(endbact_abund_figure, filename = "endbact_abund_fig.pdf", width=12, height=6)
+
+
+```
+
+
+##..Part 5: Random Forest
+
+##Bacterial RF
+```{r Format Data- Bacteria}
+bfamtx <- data.frame(t(bac_tx), "CouponTime" = colnames(bac_tx))
+
+#combine taxa table with metadata
+bfamtx$CouponTime <- rownames(bfamtx)
+bdata <- inner_join(bfamtx, be_data %>%
+         dplyr::select(CouponTime, Materials, RH, Day)) 
+bdata$Day <- as.factor(bdata$Day)
+
+wet <- bdata %>%
+  filter(RH == "WET")
+
+cyc <- bdata %>%
+  filter(RH == "CYC")
+
+split <- sample.split(wet, SplitRatio = .7) #train on 70% of samples, test on 30%
+
+
+#r Train model- Bacteria wet
+#split into train/test data sets
+train <- subset(wet, split == "TRUE") %>%
+  na.omit()
+test <- subset(wet, split == "FALSE") %>%
+  na.omit()
+
+#fitting rf classifier
+set.seed(120)
+classifier_RF <- randomForest(x = train[-c(362:365)],
+                              y = train$Materials,
+                              ntree = 10000)
+classifier_RF #OOB error rate: ~36%
+
+#6 Feb 2024 run:
+# Call:
+#  randomForest(x = train[-c(362:365)], y = train$Materials, ntree = 10000) 
+#                Type of random forest: classification
+#                      Number of trees: 10000
+# No. of variables tried at each split: 19
+# 
+#         OOB estimate of  error rate: 36.59%
+# Confusion matrix:
+#     GW MDF OSB class.error
+# GW  18   6   1   0.2800000
+# MDF  3  20   7   0.3333333
+# OSB  2  11  14   0.4814815
+
+#r Test model - Bacteria wet
+set.seed(120)
+y_pred <- predict(classifier_RF, newdata = test[-c(363)])
+
+conf_mtx <- table(test$Materials, y_pred)
+conf_mtx
+
+#6 Feb 2024:
+  #    y_pred
+  #     GW MDF OSB
+  # GW  11   0   2
+  # MDF  0   7   3
+  # OSB  0   4   7
+
+brhimp <- importance(classifier_RF)
+brfwet <- data.frame(brhimp) %>%
+  filter(MeanDecreaseGini >= 1.0) 
+brfwet #5-9 taxa identified
+
+#6 Feb 2024 run:
+#                                   MeanDecreaseGini
+# X40c3d6d3b803f38df3fd0d711ac09455         1.442101 Bacillus1
+# cd78e04e781d700b7726dcace8358210          1.238737 Bacillus2
+# ef1b5dd4f508be7289f8ed998f76fc69          1.008451 Bacillus3
+# X82823c0211c6d4836076653f8ff121c5         1.202817 Bacillus4
+# f893afe8032193d3b3c031627b992e5f          1.172388 Bacillus5
+# b501fb9a8270170fe88606bf0344d8f1          1.451198 Bacillus6
+# X03cd3b56bad3b9b2d92753dc063427e5         1.707206 Bacillus7
+# X420023a9b96e5778ec2092fb0e08844d         1.508370 Bacillus8
+# f0aa3e9959b8a68796406b4d3244c298          1.192771 Bacillus9
+
+
+
+#r Train model- Bacteria cyc
+#split into train/test data sets
+split <- sample.split(cyc, SplitRatio = .7) #train on 70% of samples, test on 30%
+train <- subset(cyc, split == "TRUE") %>%
+  na.omit()
+test <- subset(cyc, split == "FALSE") %>%
+  na.omit()
+
+#fitting rf classifier
+set.seed(120)
+classifier_RF <- randomForest(x = train[-c(362:365)],
+                              y = train$Materials,
+                              ntree = 10000)
+classifier_RF #OOB error rate: ~30%
+
+#6 Feb 2024 run:
+# Call:
+#  randomForest(x = train[-c(362:365)], y = train$Materials, ntree = 10000) 
+#                Type of random forest: classification
+#                      Number of trees: 10000
+# No. of variables tried at each split: 19
+# 
+#         OOB estimate of  error rate: 30.12%
+# Confusion matrix:
+#     GW MDF OSB class.error
+# GW  28   3   3   0.1764706
+# MDF  5  17   5   0.3703704
+# OSB  5   4  13   0.4090909
+
+#r Test model - Bacteria cyc
+y_pred <- predict(classifier_RF, newdata = test[-c(363)])
+
+conf_mtx <- table(test$Materials, y_pred)
+conf_mtx
+
+#6 Feb 2024 run:
+  #    y_pred
+  #     GW MDF OSB
+  # GW   7   2   0
+  # MDF  1   7   3
+  # OSB  3   8   7
+
+brhimp <- importance(classifier_RF)
+brfcyc <- data.frame(brhimp) %>%
+  filter(MeanDecreaseGini >= 1.0) 
+brfcyc #3-7 taxa identified
+
+#6 Feb 2024 run:
+#                                   MeanDecreaseGini
+# X253b52e63a4b8d5ba438ff93eca77e00         1.102711 Sphingomonas1
+# a397341ad27b833bbbc1bedbd74d079d          1.117157 Sphingomonas2
+# X0fa0a856513c27e6e88ea341af624784         1.139485 Sphingomonas3
+# X35e02432c3136b051fc7641161ea17d1         1.019135 Sphingomonas4
+
+
+#select SVs from tbac to use as response variables after combining with be_data
+lmbac <- dplyr::select(checkbac_tx, c(
+  X40c3d6d3b803f38df3fd0d711ac09455, #all 3-way sig unless otherwise noted; materials highly sig for all
+  cd78e04e781d700b7726dcace8358210,
+  ef1b5dd4f508be7289f8ed998f76fc69,
+  X82823c0211c6d4836076653f8ff121c5, #3-way marg
+  f893afe8032193d3b3c031627b992e5f,
+  b501fb9a8270170fe88606bf0344d8f1,
+  X03cd3b56bad3b9b2d92753dc063427e5,
+  X420023a9b96e5778ec2092fb0e08844d,
+  f0aa3e9959b8a68796406b4d3244c298, #3-way nonsig, RHxmaterial sig and materials highly sig
+  X253b52e63a4b8d5ba438ff93eca77e00, 
+  a397341ad27b833bbbc1bedbd74d079d,
+  X0fa0a856513c27e6e88ea341af624784,
+  X35e02432c3136b051fc7641161ea17d1
+))
+
+#add column of coupon IDs and sampling times to match up with be_data
+lmbac$CouponTime <- row.names(lmbac)
+baclmdata <- left_join(be_data, lmbac, by = "CouponTime")
+baclmdata_noday0 <- filter(baclmdata, Day != 0)
+```
+
+Plotting and analyzing focal bacteria
+```{r}
+#first LMM of focal bacterial taxa, adapted from 16S richness LMM at the top
+#note, run code in the following chunks in order because model name is re-used
+baclmm1 <- lmer((X35e02432c3136b051fc7641161ea17d1) ~ RH * Day * Materials + (1|CouponId), data = baclmdata_noday0, na.action = na.omit)
+plot(baclmm1) #clr makes residuals odd
+qqnorm(resid(baclmm1)) #
+hist(resid(baclmm1)) #
+
+options(contrasts = c("contr.sum", "contr.poly"))
+baclmm1 <- lmer((X253b52e63a4b8d5ba438ff93eca77e00) ~ RH * Day * Materials + (1|CouponId), data = baclmdata_noday0, na.action = na.omit)
+Anova(baclmm1, type = 3) #significant three-way interaction among treatment, day, and material
+options(contrasts = c("contr.treatment", "contr.poly"))
+```
+
+```{r}
+baclmm1 <- lmer((X40c3d6d3b803f38df3fd0d711ac09455) ~ RH * Day * Materials + (1|CouponId), data = baclmdata_noday0, na.action = na.omit)
+
+#plot the results to visualize effects
+baclmmmeans<-emmeans(baclmm1, ~ RH:Day:Materials, type = "response")
+baclmmmeansdata <- as.data.frame(summary(baclmmmeans))
+baclmmmeansdata$lower <- baclmmmeansdata$response-baclmmmeansdata$SE
+baclmmmeansdata$upper <- baclmmmeansdata$response+baclmmmeansdata$SE
+baclmmmeansdata$MatRH <- paste(baclmmmeansdata$Materials, baclmmmeansdata$RH)
+baclmmmeansdata$Dayoffset <- as.numeric(paste(baclmmmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+baclmmfig <- ggplot(baclmmmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=baclmmmeansdata$lower, ymax=baclmmmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "CLR Abundance", color = "Material") +
+  ylim(-6,12) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=48, y=-2.8, label="Bacillus SV1", color="black", hjust=1) +
+  geom_text(x=48, y=-4.4, label="Disturbance x Material x Day, P = 0.042", color="black", hjust=1) +
+  geom_text(x=6, y=11, label = "A", size=8, color="black")
+bacillussv1fig<-baclmmfig
+ggsave("BacillusSV1.pdf")
+
+
+baclmm1 <- lmer((X253b52e63a4b8d5ba438ff93eca77e00) ~ RH * Day * Materials + (1|CouponId), data = baclmdata_noday0, na.action = na.omit)
+
+#plot the results to visualize effects
+baclmmmeans<-emmeans(baclmm1, ~ RH:Day:Materials, type = "response")
+baclmmmeansdata <- as.data.frame(summary(baclmmmeans))
+baclmmmeansdata$lower <- baclmmmeansdata$response-baclmmmeansdata$SE
+baclmmmeansdata$upper <- baclmmmeansdata$response+baclmmmeansdata$SE
+baclmmmeansdata$MatRH <- paste(baclmmmeansdata$Materials, baclmmmeansdata$RH)
+baclmmmeansdata$Dayoffset <- as.numeric(paste(baclmmmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+baclmmfig <- ggplot(baclmmmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=baclmmmeansdata$lower, ymax=baclmmmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "CLR Abundance", color = "Material") +
+  ylim(-5,10) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=48, y=-2.7, label="Sphingomonas SV1", color="black", hjust=1) +
+  geom_text(x=48, y=-4.2, label="Disturbance x Material x Day, P = 0.001", color="black", hjust=1) +
+  geom_text(x=6, y=9, label = "B", size=8, color="black")
+sphingosv1fig<-baclmmfig
+ggsave("SphingomonasSV1.pdf")
+
+focalbacfig<-ggarrange(bacillussv1fig, sphingosv1fig, ncol=1, nrow=2, align="h")
+ggexport(focalbacfig, filename = "focalbacfig.pdf", width=9, height=6)
+```
+
+##Fungal RF
+```{r Format Data- Fungi}
+ftx <- data.frame(t(fun_tx), "CouponTime" = colnames(fun_tx))
+
+#combine taxa table with metadata
+ftx$CouponTime <- rownames(ftx)
+fdata <- inner_join(ftx, be_data %>%
+         dplyr::select(CouponTime, Materials, RH, Day)) 
+fdata$Day <- as.factor(fdata$Day)
+
+split <- sample.split(fdata, SplitRatio = .7)
+
+
+#r Train model- Fungi
+#split into train/test data sets
+train <- subset(fdata, split == "TRUE") %>%
+  na.omit()
+test <- subset(fdata, split == "FALSE") %>%
+  na.omit()
+
+#fitting rf classifier
+set.seed(120)
+classifier_RF <- randomForest(x = train[-c(184:187)],
+                              y = train$Materials,
+                              ntree = 10000)
+classifier_RF #error rate: ~28%
+
+#6 Feb 2024 run:
+#Call:
+#  randomForest(x = train[-c(184:187)], y = train$Materials, ntree = 10000) 
+#                Type of random forest: classification
+#                      Number of trees: 10000
+# No. of variables tried at each split: 13
+# 
+#         OOB estimate of  error rate: 26.83%
+# Confusion matrix:
+#     GW MDF OSB class.error
+# GW  18   1   7   0.3076923
+# MDF  2  15   6   0.3478261
+# OSB  3   3  27   0.1818182
+
+#r Test model - Fungi
+y_pred <- predict(classifier_RF, newdata = test[-c(185)])
+
+conf_mtx <- table(test$Materials, y_pred)
+conf_mtx
+
+#6 Feb 2024 run:
+  #    y_pred
+  #     GW MDF OSB
+  # GW  12   0   1
+  # MDF  1  12   8
+  # OSB  3   1   6
+
+frhimp <- importance(classifier_RF)
+ffeat <- data.frame(frhimp) %>%
+  filter(MeanDecreaseGini >= 1.0) #5 taxa identified
+ffeat
+
+#6 Feb 2024 run:
+#                                   MeanDecreaseGini
+# X9b9f4504a5f58eee366ec161fdd72b7d         3.107905 Penicillium_brevicompactum
+# X2159b4d916f68a9f4bef241878a4e409         1.074982 Cladosporium_tenuissimum
+# X39c289f6267289e4d9852dc2f9d6ebd2         1.145921 Penicillum sp.
+# f8f686a20d60c7c796cc74612d6a6625          1.845618 Cladosporium_tenuissimum
+# X7557441be8768753251c69579782cca0         1.271843 Penicillium_sumatraense
+# d7c5c6f17a42b55b738662bc03fabe5b          1.073334 Aspergillus sp. 
+
+
+
+#select SVs from checkfun_tx to use as response variables after combining with be_data
+lmfun <- dplyr::select(checkfun_tx, c(
+  X9b9f4504a5f58eee366ec161fdd72b7d, #Materials*, RHxDay*
+  X2159b4d916f68a9f4bef241878a4e409, #Materials*
+  X39c289f6267289e4d9852dc2f9d6ebd2, #Materials*
+  f8f686a20d60c7c796cc74612d6a6625, #RHxMaterialsxDay*, Materials*
+  X7557441be8768753251c69579782cca0, #Materials**
+  d7c5c6f17a42b55b738662bc03fabe5b #Materials***
+))
+
+#add column of coupon IDs and sampling times to match up with be_data
+lmfun$CouponTime <- row.names(lmfun)
+funlmdata <- left_join(be_data, lmfun, by = "CouponTime")
+funlmdata_noday0 <- filter(funlmdata, Day != 0)
+```
+
+
+Plotting and analyzing focal fungi
+```{r}
+
+#first LMM of focal fungal taxa, adapted from 16S richness LMM at the top
+
+funlmm1 <- lmer((f8f686a20d60c7c796cc74612d6a6625) ~ RH * Day * Materials + (1|CouponId), data = funlmdata_noday0, na.action = na.omit)
+plot(funlmm1) #clr makes residuals odd
+qqnorm(resid(funlmm1)) #
+hist(resid(funlmm1)) #
+
+options(contrasts = c("contr.sum", "contr.poly"))
+funlmm1 <- lmer((d7c5c6f17a42b55b738662bc03fabe5b) ~ RH * Day * Materials + (1|CouponId), data = funlmdata_noday0, na.action = na.omit)
+Anova(funlmm1, type = 3) #significant three-way interaction among treatment, day, and material
+options(contrasts = c("contr.treatment", "contr.poly"))
+```
+
+```{r}
+funlmm1 <- lmer((d7c5c6f17a42b55b738662bc03fabe5b) ~ RH * Day * Materials + (1|CouponId), data = funlmdata_noday0, na.action = na.omit)
+
+#plot the results to visualize effects
+funlmmmeans<-emmeans(funlmm1, ~ RH:Day:Materials, type = "response")
+funlmmmeansdata <- as.data.frame(summary(funlmmmeans))
+funlmmmeansdata$lower <- funlmmmeansdata$response-funlmmmeansdata$SE
+funlmmmeansdata$upper <- funlmmmeansdata$response+funlmmmeansdata$SE
+funlmmmeansdata$MatRH <- paste(funlmmmeansdata$Materials, funlmmmeansdata$RH)
+funlmmmeansdata$Dayoffset <- as.numeric(paste(funlmmmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+funlmmfig <- ggplot(funlmmmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=funlmmmeansdata$lower, ymax=funlmmmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "CLR Abundance", color = "Material") +
+  ylim(-5,5) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=10, y=4.5, label="Aspergillus SV1", color="black", hjust=0) +
+  geom_text(x=10, y=3.5, label="Materials, P < 0.001", color="black", hjust=0) +
+  geom_text(x=6, y=4.5, label = "C", size=8, color="black")
+aspergillusfig <- funlmmfig
+#ggsave("AspergillusSV1.pdf")
+
+
+funlmm1 <- lmer((X2159b4d916f68a9f4bef241878a4e409) ~ RH * Day * Materials + (1|CouponId), data = funlmdata_noday0, na.action = na.omit)
+
+#plot the results to visualize effects
+funlmmmeans<-emmeans(funlmm1, ~ RH:Day:Materials, type = "response")
+funlmmmeansdata <- as.data.frame(summary(funlmmmeans))
+funlmmmeansdata$lower <- funlmmmeansdata$response-funlmmmeansdata$SE
+funlmmmeansdata$upper <- funlmmmeansdata$response+funlmmmeansdata$SE
+funlmmmeansdata$MatRH <- paste(funlmmmeansdata$Materials, funlmmmeansdata$RH)
+funlmmmeansdata$Dayoffset <- as.numeric(paste(funlmmmeansdata$Day))+c(rep(-1,8),rep(0,8),rep(1,8))
+
+funlmmfig <- ggplot(funlmmmeansdata, aes(x=Dayoffset, y= response, color = Materials, shape = RH, linetype = RH, group = MatRH)) + 
+  geom_pointrange(ymin=funlmmmeansdata$lower, ymax=funlmmmeansdata$upper, size=1.5) +
+  geom_line(size=1.5) +
+  scale_color_manual(labels = c("GW", "MDF", "OSB"), values=c("goldenrod","royalblue2","seagreen")) +
+  scale_shape_manual(labels = c("CYC", "WET"), values = c(1,19)) +
+  scale_linetype_manual(labels = c("CYC", "WET"), values = c("twodash","solid")) +
+  labs(x = "Day", y = "CLR Abundance", color = "Material") +
+  ylim(0,15) +
+  theme_classic() +
+  theme(title = element_text(size = 16, face = "bold"), axis.text = element_text(size = 12), strip.text = element_text(size = 10), legend.position = "none") +
+  scale_x_continuous(breaks=c(0,7,21,35,49)) +
+  geom_text(x=7, y=3.8, label="Cladosporium tenuissimum", color="black", hjust=0) +
+  geom_text(x=7, y=2, label="Materials, P < 0.001", color="black", hjust=0) +
+  geom_text(x=6, y=14, label = "D", size=8, color="black")
+cladospor <- funlmmfig
+#ggsave("CladoSV1.pdf")
+
+focalbacfunfig<-ggarrange(bacillussv1fig, sphingosv1fig, aspergillusfig, cladospor, ncol=1, nrow=4, align="hv", common.legend=TRUE)
+ggexport(focalbacfunfig, filename = "focalbacfunfig.pdf", width=8, height=12)
+```
+
